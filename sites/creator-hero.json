@@ -1,0 +1,55 @@
+{
+  "webflow_token": "989ed23e94016e3038615d429ce90b0f8b752789c9ca047f4ae84d74ddab64b3",
+  "webflow_site_id": "661a72a45f85c8b21939b0ab",
+  "blog_collection_id": "661a72a45f85c8b21939b1da",
+  "drive_folder_id": "1KyBmiE2X48v4cjeSwOlPNDSMhwayM259",
+
+  "blog_field_mapping": {
+    "name":                "name",
+    "slug":                "slug",
+    "title":               "title",
+    "meta_description":    "meta-description",
+    "short_desc":          "short-desc",
+    "hero_image":          "thumbnails",
+    "thumbnail":           "sort-thumbnails",
+    "richtext_toc":        "table-of-content",
+    "richtext_body":       "description",
+    "richtext_02":         "description-2",
+    "richtext_03":         "description-3",
+    "richtext_conclusion": "conclusion-descriptions",
+    "category":            "category",
+    "date":                "date",
+    "background_color":    "background-color",
+    "one_min_read":        "one-min-read",
+    "author_name_1":       "author-name-1",
+    "author_image_1":      "author-image-1",
+    "author_page_1":       "author-page-1",
+    "author_status_1":     "author-status-1",
+    "author_name_2":       "author-name-2",
+    "author_image_2":      "author-image-2",
+    "author_page_2":       "author-page-2",
+    "author_status_2":     "author-status-2"
+  },
+
+  "category_map": {
+    "Listicles": "66f7e6b4f4ec403186cdb864"
+  },
+
+  "faq_collection_id": "66447dc536139f93cc068b32",
+  "faq_field_mapping": {
+    "name": "name",
+    "blog_reference": "blog",
+    "question_1": "1-question",
+    "answer_1": "1-answer",
+    "question_2": "2-question",
+    "answer_2": "2-answer",
+    "question_3": "3-question",
+    "answer_3": "3-answer",
+    "question_4": "4-question",
+    "answer_4": "4-answer",
+    "question_5": "5-question",
+    "answer_5": "5-answer"
+  },
+
+  "extra_fields": {}
+}

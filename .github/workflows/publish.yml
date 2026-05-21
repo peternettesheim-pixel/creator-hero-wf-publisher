@@ -1,0 +1,45 @@
+name: Creator Hero — Weekly Blog Publisher
+
+on:
+  # Every Wednesday at 11:00 am CET (= 10:00 UTC in summer / 09:00 UTC in winter)
+  # Using 09:00 UTC so it covers both CET (UTC+1) and CEST (UTC+2) safely
+  schedule:
+    - cron: '0 9 * * 3'
+
+  # Allow manual trigger from GitHub UI (Actions tab → Run workflow)
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Publish unpublished articles
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run publisher
+        env:
+          # Stored in GitHub → Settings → Secrets and variables → Actions
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          WEBFLOW_TOKEN: ${{ secrets.WEBFLOW_TOKEN }}
+        run: python publish.py --site creator-hero
+
+      - name: Upload run log as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: publish-log-${{ github.run_id }}
+          path: '*.log'
+          if-no-files-found: ignore
+          retention-days: 30

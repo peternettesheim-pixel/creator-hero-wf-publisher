@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+
+    <!-- Unique identifier for this scheduled job -->
+    <key>Label</key>
+    <string>com.influencer-hero.blog-publisher</string>
+
+    <!-- Run: every Wednesday at 11:00am (Mac local time = CET/CEST) -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>3</integer>
+        <key>Hour</key>
+        <integer>11</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- Command: login shell so PATH / pyenv / conda are loaded correctly -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>cd "/Users/peternettesheim/Documents/Work/Influencer Hero/03 Marketing/SEO+GEO Marketing/Claude Webflow Publishing/Creator Hero WF Publisher" &amp;&amp; python3 publish.py --site creator-hero</string>
+    </array>
+
+    <!-- Log files — open with Console.app or `tail -f` to monitor -->
+    <key>StandardOutPath</key>
+    <string>/Users/peternettesheim/Library/Logs/blog-publisher.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/peternettesheim/Library/Logs/blog-publisher-error.log</string>
+
+    <!-- Do NOT run immediately when loaded, only on schedule -->
+    <key>RunAtLoad</key>
+    <false/>
+
+</dict>
+</plist>
