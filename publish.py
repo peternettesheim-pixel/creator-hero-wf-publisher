@@ -375,13 +375,11 @@ def webflow_create_cms_item(
     token: str, collection_id: str, field_data: dict,
     locale_ids: list[str] | None = None,
 ) -> str:
-    body: dict = {"fieldData": field_data, "isArchived": False, "isDraft": False}
-    if locale_ids:
-        body["cmsLocaleIds"] = locale_ids
+    # Create in primary locale
     resp = requests.post(
         f"https://api.webflow.com/v2/collections/{collection_id}/items",
         headers=_wf_headers(token),
-        json=body,
+        json={"fieldData": field_data, "isArchived": False, "isDraft": False},
     )
     if resp.status_code not in (200, 201, 202):
         raise RuntimeError(
@@ -389,6 +387,7 @@ def webflow_create_cms_item(
         )
     item_id = resp.json().get("id", "")
 
+    # Publish in primary locale
     pub_resp = requests.post(
         f"https://api.webflow.com/v2/collections/{collection_id}/items/publish",
         headers=_wf_headers(token),
@@ -398,6 +397,29 @@ def webflow_create_cms_item(
         print(f"   ⚠️   Item publish warning ({pub_resp.status_code}): {pub_resp.text[:200]}")
 
     print(f"   ✅  CMS item created: {item_id}")
+
+    # Push copies into each secondary locale via PATCH + cmsLocaleId query param
+    # This creates the locale shell so the translation task can fill in content
+    for locale_id in (locale_ids or []):
+        loc_resp = requests.patch(
+            f"https://api.webflow.com/v2/collections/{collection_id}/items/{item_id}",
+            headers=_wf_headers(token),
+            params={"cmsLocaleId": locale_id},
+            json={"fieldData": {"name": field_data.get("name", "")}, "isDraft": False},
+        )
+        if loc_resp.status_code not in (200, 201, 202):
+            print(f"   ⚠️   Locale copy failed ({locale_id}): {loc_resp.status_code} – {loc_resp.text[:200]}")
+        else:
+            print(f"   🌍  Locale copy created: {locale_id}")
+
+    # Publish locale copies if any
+    if locale_ids:
+        requests.post(
+            f"https://api.webflow.com/v2/collections/{collection_id}/items/publish",
+            headers=_wf_headers(token),
+            json={"itemIds": [item_id], "cmsLocaleIds": locale_ids},
+        )
+
     return item_id
 
 
