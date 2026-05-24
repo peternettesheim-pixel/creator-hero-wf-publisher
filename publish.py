@@ -371,11 +371,17 @@ def webflow_upload_asset(
     return asset_id, hosted_url
 
 
-def webflow_create_cms_item(token: str, collection_id: str, field_data: dict) -> str:
+def webflow_create_cms_item(
+    token: str, collection_id: str, field_data: dict,
+    locale_ids: list[str] | None = None,
+) -> str:
+    body: dict = {"fieldData": field_data, "isArchived": False, "isDraft": False}
+    if locale_ids:
+        body["cmsLocaleIds"] = locale_ids
     resp = requests.post(
         f"https://api.webflow.com/v2/collections/{collection_id}/items",
         headers=_wf_headers(token),
-        json={"fieldData": field_data, "isArchived": False, "isDraft": False},
+        json=body,
     )
     if resp.status_code not in (200, 201, 202):
         raise RuntimeError(
@@ -1109,8 +1115,12 @@ def publish_article(
             field_data[k] = v
 
     # ── Create CMS item ───────────────────────────────────────────────────
-    print("   📝  Creating Webflow CMS item...")
-    item_id = webflow_create_cms_item(token, collection_id, field_data)
+    locale_ids = config.get("secondary_locale_ids", [])
+    if locale_ids:
+        print(f"   🌍  Creating item in primary + {len(locale_ids)} locale(s)...")
+    else:
+        print("   📝  Creating Webflow CMS item...")
+    item_id = webflow_create_cms_item(token, collection_id, field_data, locale_ids)
 
     # ── Publish FAQs ──────────────────────────────────────────────────────
     if parsed.get("faqs") and config.get("faq_collection_id"):

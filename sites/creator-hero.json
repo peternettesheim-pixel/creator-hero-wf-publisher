@@ -35,6 +35,12 @@
     "Listicles": "66f7e6b4f4ec403186cdb864"
   },
 
+  "secondary_locale_ids": [
+    "69f9cf44aee76b0cb0f920cb",
+    "69f9d0db2f5b0b2039f50256",
+    "69f9e3a77de8e9718f237e9d"
+  ],
+
   "faq_collection_id": "66447dc536139f93cc068b32",
   "faq_field_mapping": {
     "name": "name",
