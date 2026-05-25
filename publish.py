@@ -56,25 +56,34 @@ VOID_ELEMENTS = {
     "link", "meta", "param", "source", "track", "wbr",
 }
 
-# Maps "Label" text in the doc (lowercase) → result dict key
+# Maps "Label" text in the doc (lowercase) → result dict key.
+# Supports both old format (Name:, Title:, Category:) and new format
+# (Article name:, SEO Title:, Categories:, Author name:, Article intro text:).
 _META_FIELDS: dict[str, str] = {
-    "name":             "cms_name",
-    "slug":             "slug",
-    "short desc":       "short_desc",
-    "title":            "title",
-    "meta description": "meta_description",
-    "category":         "category",
-    "date":             "date",
-    "background color": "background_color",
-    "one min read":     "one_min_read",
-    "author":           "author_text",
-    "author name 1":    "author_name_1",
-    "author page 1":    "author_page_1",
-    "author status 1":  "author_status_1",
-    "author name 2":    "author_name_2",
-    "author page 2":    "author_page_2",
-    "author status 2":  "author_status_2",
-    "canonical":        "canonical",
+    "name":               "cms_name",
+    "article name":       "cms_name",        # new format
+    "slug":               "slug",
+    "short desc":         "short_desc",
+    "article intro text": "short_desc",      # new format
+    "title":              "title",
+    "seo title":          "title",           # new format
+    "meta description":   "meta_description",
+    "category":           "category",
+    "categories":         "category",        # new format
+    "date":               "date",
+    "background color":   "background_color",
+    "one min read":       "one_min_read",
+    "1 min read":         "one_min_read",
+    "article readtime":   "one_min_read",    # new format
+    "author":             "author_text",
+    "author name":        "author_name_1",   # new format (single author)
+    "author name 1":      "author_name_1",
+    "author page 1":      "author_page_1",
+    "author status 1":    "author_status_1",
+    "author name 2":      "author_name_2",
+    "author page 2":      "author_page_2",
+    "author status 2":    "author_status_2",
+    "canonical":          "canonical",
 }
 
 # Image label text (uppercase, stripped of []) → destination
@@ -605,11 +614,12 @@ def parse_google_doc(doc: dict) -> dict:
             continue
 
         # ════════════════════════════════════════════════════════════════════
-        # PHASE: META  (before —DESCRIPTION 1—)
+        # PHASE: META  (before the first —DESCRIPTION 1— / —RICHTEXT 01— marker)
         # ════════════════════════════════════════════════════════════════════
         if phase == "meta":
-            # Detect section separator line (—DESCRIPTION 1— with em or regular dashes)
-            if re.search(r'DESCRIPTION\s*1', clean, re.IGNORECASE) and re.search(r'[—\-]', clean):
+            # Detect section separator line — supports old (DESCRIPTION 1) and
+            # new (RICHTEXT 01) doc formats, with em-dashes, hyphens, or both.
+            if re.search(r'(?:DESCRIPTION\s*1|RICHTEXT\s*0?1)\b', clean, re.IGNORECASE) and re.search(r'[—\-]', clean):
                 phase = "body"
                 next_image_label = None
                 continue
@@ -646,7 +656,12 @@ def parse_google_doc(doc: dict) -> dict:
             if label_m:
                 label_key = label_m.group(1).strip().lower()
                 value = label_m.group(2).strip()
-                if label_key in _META_FIELDS:
+                # Inline TOC string: "Item A • Item B • Item C" → toc_items
+                if label_key in ("toc", "table of content", "table of contents"):
+                    parts = [p.strip() for p in re.split(r"\s*[•·│|]\s*|\s{2,}•\s{2,}", value) if p.strip()]
+                    for idx, part in enumerate(parts, 1):
+                        toc_items.append((idx, part))
+                elif label_key in _META_FIELDS:
                     result[_META_FIELDS[label_key]] = value
             continue
 
@@ -663,6 +678,36 @@ def parse_google_doc(doc: dict) -> dict:
             if re.match(r'^FAQs?[:\.]?\s*$|^Frequently Asked Questions[:\.]?\s*$', clean, re.IGNORECASE):
                 phase = "faq"
                 continue
+
+            # Section markers within body: —RICHTEXT 02—, —RICHTEXT 03—, —CONCLUSION—
+            # (and [RICHTEXT 2] bracket variant). Emit section_start blocks so the
+            # splitter routes subsequent content into the matching field.
+            section_m = re.match(
+                r'^[—\-\[]+\s*(RICHTEXT\s*0?(\d+)|CONCLUSION)\s*[—\-\]]+\s*$',
+                clean, re.IGNORECASE,
+            )
+            if section_m:
+                tok = section_m.group(1).upper().replace(" ", "").replace("0", "")
+                if "CONCLUSION" in tok:
+                    section_name = "conclusion"
+                else:
+                    num = section_m.group(2)
+                    section_name = f"richtext_{int(num)}"
+                # —RICHTEXT 01— is the meta→body separator; in body phase treat it
+                # as a no-op (everything after is already the body's "default" section).
+                if section_name not in ("richtext_1",):
+                    result["body_blocks"].append({"type": "section_start", "section": section_name})
+                continue
+
+            # Stray meta labels that appear inside the body (SEO Title, Meta Description,
+            # Canonical, etc.) — capture them as meta and don't emit body content.
+            stray_meta = re.match(r'^([A-Za-z][A-Za-z0-9 ]{0,30}):\s*(.+)$', clean)
+            if stray_meta:
+                key = stray_meta.group(1).strip().lower()
+                val = stray_meta.group(2).strip()
+                if key in _META_FIELDS and not result.get(_META_FIELDS[key]):
+                    result[_META_FIELDS[key]] = val
+                    continue
 
             # Pure-image paragraphs have no text runs → clean == "".
             # Detect them BEFORE the empty-line guard so they aren't skipped.
@@ -758,18 +803,45 @@ def parse_google_doc(doc: dict) -> dict:
             text_runs = [r for r in runs if r["type"] == "text" and r["text"].strip()]
             if not text_runs:
                 continue
-            # Question detection: bold NORMAL_TEXT *or* any heading style (H1–H5).
-            # Heading-style questions don't have bold:true on their runs, so checking
-            # bold alone misses them. named_style comes from the paragraph's namedStyleType.
-            all_bold = all(r.get("bold", False) for r in text_runs)
+
             is_heading = named_style in HEADING_LEVEL_MAP
-            if all_bold or is_heading:
-                question = "".join(r["text"] for r in text_runs)
-                # Skip any remaining metadata-style "Label: value" lines
-                if re.match(r'^[A-Za-z ]{1,30}:\s', question):
+
+            # Case 1: heading-styled paragraph (H1–H5). Entire text is the question.
+            if is_heading:
+                question = "".join(r["text"] for r in text_runs).strip()
+                if question and not re.match(r'^[A-Za-z ]{1,30}:\s', question):
+                    result["faqs"].append({"question": question, "answer": []})
+                continue
+
+            # Case 2: plain paragraph with mixed bold/non-bold runs. Many docs put
+            # the question (bold) and the start of the answer (plain) in a SINGLE
+            # paragraph separated by a soft line break — split on the bold/plain
+            # boundary so we capture both halves.
+            bold_prefix = []
+            plain_suffix = []
+            seen_plain = False
+            for r in text_runs:
+                if not seen_plain and r.get("bold", False):
+                    bold_prefix.append(r)
+                else:
+                    seen_plain = True
+                    plain_suffix.append(r)
+
+            if bold_prefix:
+                question = "".join(r["text"] for r in bold_prefix).strip()
+                # Skip stray "Label: value" lines that survive metadata filters
+                if not question or re.match(r'^[A-Za-z ]{1,30}:\s', question):
                     continue
                 result["faqs"].append({"question": question, "answer": []})
-            elif result["faqs"]:
+                # Same-paragraph answer fragment
+                if plain_suffix:
+                    answer_html = _runs_to_html(plain_suffix).strip()
+                    if answer_html:
+                        result["faqs"][-1]["answer"].append(f"<p>{answer_html}</p>")
+                continue
+
+            # Case 3: all-plain paragraph → append to the previous question's answer
+            if result["faqs"]:
                 html = _runs_to_html(runs)
                 if html.strip():
                     result["faqs"][-1]["answer"].append(html)
