@@ -659,8 +659,8 @@ def parse_google_doc(doc: dict) -> dict:
                 phase = "toc"
                 continue
 
-            # Transition to FAQ phase
-            if re.match(r'^FAQs?$', clean, re.IGNORECASE):
+            # Transition to FAQ phase — match all common variants
+            if re.match(r'^FAQs?[:\.]?\s*$|^Frequently Asked Questions[:\.]?\s*$', clean, re.IGNORECASE):
                 phase = "faq"
                 continue
 
@@ -726,7 +726,7 @@ def parse_google_doc(doc: dict) -> dict:
         # PHASE: TOC
         # ════════════════════════════════════════════════════════════════════
         if phase == "toc":
-            if re.match(r'^FAQs?$', clean, re.IGNORECASE):
+            if re.match(r'^FAQs?[:\.]?\s*$|^Frequently Asked Questions[:\.]?\s*$', clean, re.IGNORECASE):
                 phase = "faq"
                 continue
             if not clean:
@@ -749,8 +749,8 @@ def parse_google_doc(doc: dict) -> dict:
         if phase == "faq":
             if not clean:
                 continue
-            # Skip repeated "FAQs" heading and metadata lines (Name:, Slug:, Blog:)
-            if re.match(r'^FAQs?$', clean, re.IGNORECASE):
+            # Skip repeated FAQ headings and metadata lines (Name:, Slug:, Blog:)
+            if re.match(r'^FAQs?[:\.]?\s*$|^Frequently Asked Questions[:\.]?\s*$', clean, re.IGNORECASE):
                 continue
             if re.match(r'^(Name|Slug|Blog)\s*:', clean, re.IGNORECASE):
                 continue
@@ -758,9 +758,12 @@ def parse_google_doc(doc: dict) -> dict:
             text_runs = [r for r in runs if r["type"] == "text" and r["text"].strip()]
             if not text_runs:
                 continue
-            # Bold paragraph = question; plain paragraph = answer
+            # Question detection: bold NORMAL_TEXT *or* any heading style (H1–H5).
+            # Heading-style questions don't have bold:true on their runs, so checking
+            # bold alone misses them. named_style comes from the paragraph's namedStyleType.
             all_bold = all(r.get("bold", False) for r in text_runs)
-            if all_bold:
+            is_heading = named_style in HEADING_LEVEL_MAP
+            if all_bold or is_heading:
                 question = "".join(r["text"] for r in text_runs)
                 # Skip any remaining metadata-style "Label: value" lines
                 if re.match(r'^[A-Za-z ]{1,30}:\s', question):
@@ -892,10 +895,16 @@ def publish_faqs(
     article_name: str,
     config: dict,
     dry_run: bool = False,
+    locale_ids: list[str] | None = None,
 ) -> None:
     """
     Create ONE FAQ CMS item per article with up to 5 numbered Q&A pairs.
     Schema: name, blog (Reference), 1-question/1-answer … 5-question/5-answer
+
+    For secondary locale copies the blog reference is stripped — Webflow returns
+    400 "Referenced item not found" when a primary-locale item ID is referenced
+    in a secondary locale context. Q&A content is left blank for the translation
+    pipeline to fill in.
     """
     faq_collection_id = config.get("faq_collection_id", "")
     if not faq_collection_id or not faqs:
@@ -903,9 +912,11 @@ def publish_faqs(
 
     token = config["webflow_token"]
     faq_map = config.get("faq_field_mapping", {})
+    locale_ids = locale_ids or []
 
     if dry_run:
-        print(f"   [DRY RUN] FAQs: would create 1 FAQ item with {len(faqs)} Q&A(s)")
+        locale_note = f" + {len(locale_ids)} locale(s)" if locale_ids else ""
+        print(f"   [DRY RUN] FAQs: would create 1 FAQ item{locale_note} with {len(faqs)} Q&A(s)")
         for i, faq in enumerate(faqs[:5], 1):
             print(f"      Q{i}: {faq['question'][:80]}")
         return
@@ -924,8 +935,9 @@ def publish_faqs(
         field_data[a_field] = answer_html
 
     try:
-        webflow_create_cms_item(token, faq_collection_id, field_data)
-        print(f"   ✅  FAQ item created ({min(len(faqs), 5)} Q&As)")
+        webflow_create_cms_item(token, faq_collection_id, field_data, locale_ids)
+        print(f"   ✅  FAQ item created ({min(len(faqs), 5)} Q&As)"
+              + (f" + {len(locale_ids)} locale(s)" if locale_ids else ""))
     except Exception as e:
         print(f"   ⚠️   FAQ item error: {e}")
 
@@ -1147,8 +1159,9 @@ def publish_article(
     # ── Publish FAQs ──────────────────────────────────────────────────────
     if parsed.get("faqs") and config.get("faq_collection_id"):
         article_name = parsed.get("cms_name") or display_name
-        print(f"   📝  Publishing FAQ item ({len(parsed['faqs'])} Q&As)...")
-        publish_faqs(parsed["faqs"], item_id, article_name, config, dry_run=False)
+        locale_note = f" + {len(locale_ids)} locale(s)" if locale_ids else ""
+        print(f"   📝  Publishing FAQ item ({len(parsed['faqs'])} Q&As{locale_note})...")
+        publish_faqs(parsed["faqs"], item_id, article_name, config, dry_run=False, locale_ids=locale_ids)
 
     return item_id
 
