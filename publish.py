@@ -386,15 +386,19 @@ def webflow_create_cms_item(
     locale_strip_keys: tuple[str, ...] = (),
 ) -> str:
     """
-    Create a CMS item in the primary locale and copy the same fieldData into
-    each secondary locale shell so the items have content (slug, body, hero,
-    etc.) immediately — not just a name. The translation pipeline overwrites
-    these locale values later.
+    Create a CMS item in the primary locale, then create + publish a separate
+    item per secondary locale via POST with `cmsLocaleId` in the request body.
 
-    `locale_strip_keys` lists field keys that must NOT be sent to secondary
-    locales (e.g. Reference fields whose target IDs only exist in primary).
+    Confirmed working approach per webflow-blog-publisher skill (D2C Stack
+    publisher uses this and produces visible content in DE/FR/ES). PATCHing
+    an existing item with a `cmsLocaleId` query param does NOT create
+    proper locale variants — it returns 2xx but Designer renders nothing.
+
+    `locale_strip_keys` lists fieldData keys that must NOT be sent to
+    secondary locales (Reference fields whose target IDs are primary-only,
+    e.g. the FAQ's `blog` reference and the blog's `category` reference).
     """
-    # Create in primary locale
+    # 1. Create + publish primary locale (no cmsLocaleId in body)
     resp = requests.post(
         f"https://api.webflow.com/v2/collections/{collection_id}/items",
         headers=_wf_headers(token),
@@ -406,64 +410,50 @@ def webflow_create_cms_item(
         )
     item_id = resp.json().get("id", "")
 
-    # Publish in primary locale
     pub_resp = requests.post(
         f"https://api.webflow.com/v2/collections/{collection_id}/items/publish",
         headers=_wf_headers(token),
         json={"itemIds": [item_id]},
     )
     if pub_resp.status_code not in (200, 201, 202):
-        print(f"   ⚠️   Item publish warning ({pub_resp.status_code}): {pub_resp.text[:200]}")
+        print(f"   ⚠️   Primary publish warning ({pub_resp.status_code}): {pub_resp.text[:200]}")
 
-    print(f"   ✅  CMS item created: {item_id}")
-
-    # Build the fieldData payload for secondary locales — start from the full
-    # primary payload, then drop any fields that don't translate cleanly across
-    # locales (e.g. blog Reference field on FAQ items).
+    # 2. Create + publish one item per secondary locale.
+    # Each POST returns a separate item ID; they're independent CMS items
+    # filed under the same collection but tagged to a specific locale.
     locale_field_data = {k: v for k, v in field_data.items() if k not in locale_strip_keys}
-
-    # Push copies into each secondary locale via PATCH + cmsLocaleId query param.
-    # Each locale shell starts as a clone of English; the translator will
-    # overwrite the textual fields in-place per locale.
+    locale_count = 0
     for locale_id in (locale_ids or []):
-        loc_resp = requests.patch(
-            f"https://api.webflow.com/v2/collections/{collection_id}/items/{item_id}",
+        loc_resp = requests.post(
+            f"https://api.webflow.com/v2/collections/{collection_id}/items",
             headers=_wf_headers(token),
-            params={"cmsLocaleId": locale_id},
-            json={"fieldData": locale_field_data, "isDraft": False},
+            json={
+                "fieldData": locale_field_data,
+                "cmsLocaleId": locale_id,
+                "isArchived": False,
+                "isDraft": False,
+            },
         )
         if loc_resp.status_code not in (200, 201, 202):
-            # If the full payload was rejected (e.g. an unexpected reference
-            # field), fall back to sending just the name + slug so the shell
-            # still exists for the translator to populate.
-            short = {"name": field_data.get("name", "")}
-            if field_data.get("slug"):
-                short["slug"] = field_data["slug"]
-            retry_resp = requests.patch(
-                f"https://api.webflow.com/v2/collections/{collection_id}/items/{item_id}",
-                headers=_wf_headers(token),
-                params={"cmsLocaleId": locale_id},
-                json={"fieldData": short, "isDraft": False},
-            )
-            if retry_resp.status_code not in (200, 201, 202):
-                print(f"   ⚠️   Locale copy failed ({locale_id}): "
-                      f"{loc_resp.status_code} – {loc_resp.text[:200]}")
-            else:
-                print(f"   🌍  Locale copy created (name+slug only) — full payload was rejected: "
-                      f"{loc_resp.text[:160]}")
-        else:
-            print(f"   🌍  Locale copy created: {locale_id}")
-
-    # Publish locale copies if any
-    if locale_ids:
-        pub_loc = requests.post(
+            print(f"   ⚠️   Locale POST failed ({locale_id}): "
+                  f"{loc_resp.status_code} – {loc_resp.text[:300]}")
+            continue
+        loc_item_id = loc_resp.json().get("id", "")
+        # Publish this locale item
+        loc_pub = requests.post(
             f"https://api.webflow.com/v2/collections/{collection_id}/items/publish",
             headers=_wf_headers(token),
-            json={"itemIds": [item_id], "cmsLocaleIds": locale_ids},
+            json={"itemIds": [loc_item_id]},
         )
-        if pub_loc.status_code not in (200, 201, 202):
-            print(f"   ⚠️   Locale publish warning ({pub_loc.status_code}): "
-                  f"{pub_loc.text[:200]}")
+        if loc_pub.status_code not in (200, 201, 202):
+            print(f"   ⚠️   Locale publish warning ({locale_id}): "
+                  f"{loc_pub.status_code} – {loc_pub.text[:200]}")
+            continue
+        locale_count += 1
+        print(f"   🌍  Locale copy created + published: {locale_id} → {loc_item_id}")
+
+    locale_suffix = f" (+{locale_count} locale{'s' if locale_count != 1 else ''})" if locale_ids else ""
+    print(f"   ✅  CMS item created: {item_id}{locale_suffix}")
 
     return item_id
 
@@ -1044,7 +1034,8 @@ def publish_faqs(
 
     try:
         # The blog Reference field can't carry the primary-locale ID into a
-        # secondary locale — Webflow rejects it. Strip it on the locale PATCH.
+        # secondary locale — Webflow rejects it. Strip it on the locale POST.
+        # webflow_create_cms_item logs its own "CMS item created" + locale lines.
         webflow_create_cms_item(
             token,
             faq_collection_id,
@@ -1052,8 +1043,6 @@ def publish_faqs(
             locale_ids,
             locale_strip_keys=(blog_ref,),
         )
-        print(f"   ✅  FAQ item created ({min(len(faqs), 5)} Q&As)"
-              + (f" + {len(locale_ids)} locale(s)" if locale_ids else ""))
     except Exception as e:
         print(f"   ⚠️   FAQ item error: {e}")
 
