@@ -384,19 +384,27 @@ def webflow_create_cms_item(
     token: str, collection_id: str, field_data: dict,
     locale_ids: list[str] | None = None,
     locale_strip_keys: tuple[str, ...] = (),
-) -> str:
+    locale_field_overrides: dict[str, dict] | None = None,
+) -> dict:
     """
-    Create a CMS item in the primary locale, then create + publish a separate
-    item per secondary locale via POST with `cmsLocaleId` in the request body.
+    Create + publish a CMS item in the primary locale, then create + publish
+    a separate item per secondary locale via POST with `cmsLocaleId` in the
+    request body. Each POST returns its own item ID; the locale items are
+    independent CMS items tagged to specific locales (this is the confirmed
+    working pattern from the webflow-blog-publisher skill / D2C Stack).
 
-    Confirmed working approach per webflow-blog-publisher skill (D2C Stack
-    publisher uses this and produces visible content in DE/FR/ES). PATCHing
-    an existing item with a `cmsLocaleId` query param does NOT create
-    proper locale variants — it returns 2xx but Designer renders nothing.
+    Returns:
+        {"primary_id": <str>, "locale_map": {<locale_id>: <locale_item_id>}}
 
-    `locale_strip_keys` lists fieldData keys that must NOT be sent to
-    secondary locales (Reference fields whose target IDs are primary-only,
-    e.g. the FAQ's `blog` reference and the blog's `category` reference).
+    Arguments:
+        locale_strip_keys: fieldData keys that must NOT be sent to any
+            secondary locale (Reference fields whose target IDs are
+            primary-only, e.g. the blog's `category` reference).
+        locale_field_overrides: per-locale field overrides, used when a
+            field needs a *different value* in each locale rather than the
+            primary value. Example: the FAQ's `blog` reference must point at
+            *that locale's* blog item ID, not the primary one. An override
+            for a given field beats locale_strip_keys for that locale.
     """
     # 1. Create + publish primary locale (no cmsLocaleId in body)
     resp = requests.post(
@@ -408,27 +416,35 @@ def webflow_create_cms_item(
         raise RuntimeError(
             f"CMS item creation failed ({resp.status_code}): {resp.text[:400]}"
         )
-    item_id = resp.json().get("id", "")
+    primary_id = resp.json().get("id", "")
 
     pub_resp = requests.post(
         f"https://api.webflow.com/v2/collections/{collection_id}/items/publish",
         headers=_wf_headers(token),
-        json={"itemIds": [item_id]},
+        json={"itemIds": [primary_id]},
     )
     if pub_resp.status_code not in (200, 201, 202):
         print(f"   ⚠️   Primary publish warning ({pub_resp.status_code}): {pub_resp.text[:200]}")
 
-    # 2. Create + publish one item per secondary locale.
-    # Each POST returns a separate item ID; they're independent CMS items
-    # filed under the same collection but tagged to a specific locale.
-    locale_field_data = {k: v for k, v in field_data.items() if k not in locale_strip_keys}
-    locale_count = 0
+    # 2. Create + publish one item per secondary locale, with optional
+    # per-locale field overrides.
+    locale_map: dict[str, str] = {}
     for locale_id in (locale_ids or []):
+        overrides = (locale_field_overrides or {}).get(locale_id, {})
+        locale_data: dict = {}
+        for k, v in field_data.items():
+            if k in overrides:
+                continue  # will be replaced from overrides below
+            if k in locale_strip_keys:
+                continue  # always drop for secondary locales
+            locale_data[k] = v
+        locale_data.update(overrides)
+
         loc_resp = requests.post(
             f"https://api.webflow.com/v2/collections/{collection_id}/items",
             headers=_wf_headers(token),
             json={
-                "fieldData": locale_field_data,
+                "fieldData": locale_data,
                 "cmsLocaleId": locale_id,
                 "isArchived": False,
                 "isDraft": False,
@@ -439,7 +455,6 @@ def webflow_create_cms_item(
                   f"{loc_resp.status_code} – {loc_resp.text[:300]}")
             continue
         loc_item_id = loc_resp.json().get("id", "")
-        # Publish this locale item
         loc_pub = requests.post(
             f"https://api.webflow.com/v2/collections/{collection_id}/items/publish",
             headers=_wf_headers(token),
@@ -449,13 +464,16 @@ def webflow_create_cms_item(
             print(f"   ⚠️   Locale publish warning ({locale_id}): "
                   f"{loc_pub.status_code} – {loc_pub.text[:200]}")
             continue
-        locale_count += 1
+        locale_map[locale_id] = loc_item_id
         print(f"   🌍  Locale copy created + published: {locale_id} → {loc_item_id}")
 
-    locale_suffix = f" (+{locale_count} locale{'s' if locale_count != 1 else ''})" if locale_ids else ""
-    print(f"   ✅  CMS item created: {item_id}{locale_suffix}")
+    locale_suffix = (
+        f" (+{len(locale_map)} locale{'s' if len(locale_map) != 1 else ''})"
+        if locale_ids else ""
+    )
+    print(f"   ✅  CMS item created: {primary_id}{locale_suffix}")
 
-    return item_id
+    return {"primary_id": primary_id, "locale_map": locale_map}
 
 
 def webflow_patch_cms_item(
@@ -994,6 +1012,7 @@ def publish_faqs(
     config: dict,
     dry_run: bool = False,
     locale_ids: list[str] | None = None,
+    blog_locale_map: dict[str, str] | None = None,
 ) -> None:
     """
     Create ONE FAQ CMS item per article with up to 5 numbered Q&A pairs.
@@ -1033,8 +1052,17 @@ def publish_faqs(
         field_data[a_field] = answer_html
 
     try:
-        # The blog Reference field can't carry the primary-locale ID into a
-        # secondary locale — Webflow rejects it. Strip it on the locale POST.
+        # The blog Reference must point at *that locale's* blog item ID, not
+        # the primary one (Webflow rejects primary IDs in secondary locales).
+        # blog_locale_map maps locale_id -> locale blog item ID; build a
+        # per-locale override so each FAQ links to its localized blog. Any
+        # locale missing from the map falls through to locale_strip_keys and
+        # gets the blog ref dropped entirely.
+        locale_overrides: dict[str, dict] = {}
+        for loc_id, loc_blog_id in (blog_locale_map or {}).items():
+            if loc_blog_id:
+                locale_overrides[loc_id] = {blog_ref: loc_blog_id}
+
         # webflow_create_cms_item logs its own "CMS item created" + locale lines.
         webflow_create_cms_item(
             token,
@@ -1042,6 +1070,7 @@ def publish_faqs(
             field_data,
             locale_ids,
             locale_strip_keys=(blog_ref,),
+            locale_field_overrides=locale_overrides,
         )
     except Exception as e:
         print(f"   ⚠️   FAQ item error: {e}")
@@ -1259,20 +1288,27 @@ def publish_article(
         print(f"   🌍  Creating item in primary + {len(locale_ids)} locale(s)...")
     else:
         print("   📝  Creating Webflow CMS item...")
-    # Category is a Reference field — its target item ID only exists in primary.
-    # Strip it on the locale PATCH so Webflow doesn't reject the locale shell.
+    # Category is a Reference field — its target item ID only exists in
+    # primary. Strip it on the locale POST so Webflow doesn't reject the
+    # locale item.
     blog_locale_strip = (field_map.get("category", ""),) if field_map.get("category") else ()
-    item_id = webflow_create_cms_item(
+    blog_result = webflow_create_cms_item(
         token, collection_id, field_data, locale_ids,
         locale_strip_keys=blog_locale_strip,
     )
+    item_id = blog_result["primary_id"]
+    blog_locale_map = blog_result["locale_map"]
 
     # ── Publish FAQs ──────────────────────────────────────────────────────
     if parsed.get("faqs") and config.get("faq_collection_id"):
         article_name = parsed.get("cms_name") or display_name
         locale_note = f" + {len(locale_ids)} locale(s)" if locale_ids else ""
         print(f"   📝  Publishing FAQ item ({len(parsed['faqs'])} Q&As{locale_note})...")
-        publish_faqs(parsed["faqs"], item_id, article_name, config, dry_run=False, locale_ids=locale_ids)
+        publish_faqs(
+            parsed["faqs"], item_id, article_name, config,
+            dry_run=False, locale_ids=locale_ids,
+            blog_locale_map=blog_locale_map,
+        )
 
     return item_id
 
