@@ -406,28 +406,38 @@ def webflow_create_cms_item(
             *that locale's* blog item ID, not the primary one. An override
             for a given field beats locale_strip_keys for that locale.
     """
-    # 1. Create + publish primary locale (no cmsLocaleId in body)
+    def _extract_item_id(resp_json: dict) -> str:
+        """Pull the new item ID from Webflow's response. /items/live can return
+        either {"id": "..."} or {"items": [{"id": "..."}]} depending on whether
+        the request was a single-item or bulk payload."""
+        if not isinstance(resp_json, dict):
+            return ""
+        if resp_json.get("id"):
+            return resp_json["id"]
+        items = resp_json.get("items") or []
+        if items and isinstance(items[0], dict):
+            return items[0].get("id", "")
+        return ""
+
+    # 1. Create + publish primary locale via /items/live (single call —
+    # creates the item and publishes it live, no second-step publish needed).
+    # The previous POST /items + POST /items/publish pattern returned 404 on
+    # the publish step for locale items, so we use /items/live for both.
     resp = requests.post(
-        f"https://api.webflow.com/v2/collections/{collection_id}/items",
+        f"https://api.webflow.com/v2/collections/{collection_id}/items/live",
         headers=_wf_headers(token),
-        json={"fieldData": field_data, "isArchived": False, "isDraft": False},
+        json={"fieldData": field_data, "isArchived": False},
     )
     if resp.status_code not in (200, 201, 202):
         raise RuntimeError(
             f"CMS item creation failed ({resp.status_code}): {resp.text[:400]}"
         )
-    primary_id = resp.json().get("id", "")
+    primary_id = _extract_item_id(resp.json())
+    if not primary_id:
+        raise RuntimeError(f"No item ID in /items/live response: {resp.text[:300]}")
 
-    pub_resp = requests.post(
-        f"https://api.webflow.com/v2/collections/{collection_id}/items/publish",
-        headers=_wf_headers(token),
-        json={"itemIds": [primary_id]},
-    )
-    if pub_resp.status_code not in (200, 201, 202):
-        print(f"   ⚠️   Primary publish warning ({pub_resp.status_code}): {pub_resp.text[:200]}")
-
-    # 2. Create + publish one item per secondary locale, with optional
-    # per-locale field overrides.
+    # 2. Create + publish one item per secondary locale via /items/live,
+    # with optional per-locale field overrides.
     locale_map: dict[str, str] = {}
     for locale_id in (locale_ids or []):
         overrides = (locale_field_overrides or {}).get(locale_id, {})
@@ -441,28 +451,22 @@ def webflow_create_cms_item(
         locale_data.update(overrides)
 
         loc_resp = requests.post(
-            f"https://api.webflow.com/v2/collections/{collection_id}/items",
+            f"https://api.webflow.com/v2/collections/{collection_id}/items/live",
             headers=_wf_headers(token),
             json={
                 "fieldData": locale_data,
                 "cmsLocaleId": locale_id,
                 "isArchived": False,
-                "isDraft": False,
             },
         )
         if loc_resp.status_code not in (200, 201, 202):
-            print(f"   ⚠️   Locale POST failed ({locale_id}): "
+            print(f"   ⚠️   Locale create failed ({locale_id}): "
                   f"{loc_resp.status_code} – {loc_resp.text[:300]}")
             continue
-        loc_item_id = loc_resp.json().get("id", "")
-        loc_pub = requests.post(
-            f"https://api.webflow.com/v2/collections/{collection_id}/items/publish",
-            headers=_wf_headers(token),
-            json={"itemIds": [loc_item_id]},
-        )
-        if loc_pub.status_code not in (200, 201, 202):
-            print(f"   ⚠️   Locale publish warning ({locale_id}): "
-                  f"{loc_pub.status_code} – {loc_pub.text[:200]}")
+        loc_item_id = _extract_item_id(loc_resp.json())
+        if not loc_item_id:
+            print(f"   ⚠️   No item ID in locale response ({locale_id}): "
+                  f"{loc_resp.text[:200]}")
             continue
         locale_map[locale_id] = loc_item_id
         print(f"   🌍  Locale copy created + published: {locale_id} → {loc_item_id}")
